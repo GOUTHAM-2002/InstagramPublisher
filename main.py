@@ -1,11 +1,13 @@
 from fastapi import FastAPI, File, UploadFile, Form, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware  # Add CORS support
 import os
 import shutil
 import requests
 from dotenv import load_dotenv
 from pyngrok import ngrok, conf
 import time  # Add this at the top with other imports
+import json  # Import json module
 
 load_dotenv()
 
@@ -13,6 +15,21 @@ load_dotenv()
 ngrok.set_auth_token("2sRePffqb5ZMnaAaqRKx1IHv2bD_oY362VieueiYTQm996gR")  # Add this line before creating the tunnel
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React app default port
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React app default port
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 INSTAGRAM_APP_ID = os.getenv('INSTAGRAM_APP_ID')
 INSTAGRAM_APP_SECRET = os.getenv('INSTAGRAM_APP_SECRET')
 
@@ -38,10 +55,10 @@ async def root(hub_mode: str = Query(None, alias="hub.mode"),
             try:
                 return int(hub_challenge)
             except (TypeError, ValueError):
-                return HTMLResponse("Invalid challenge value", status_code=400)
-        return HTMLResponse("Verify token mismatch", status_code=403)
+                return JSONResponse({"error": "Invalid challenge value"}, status_code=400)
+        return JSONResponse({"error": "Verify token mismatch"}, status_code=403)
     
-    # Regular homepage for non-webhook requests
+    # Return auth URL for frontend to use
     auth_url = (
         f"https://www.instagram.com/oauth/authorize"
         f"?client_id={INSTAGRAM_APP_ID}"
@@ -53,14 +70,12 @@ async def root(hub_mode: str = Query(None, alias="hub.mode"),
         f"&enable_fb_login=0"
         f"&force_authentication=1"
     )
-    return HTMLResponse(f"""
-    <html>
-        <body>
-            <h1>Instagram Login</h1>
-            <a href="{auth_url}"><button>Login with Instagram Business Account</button></a>
-        </body>
-    </html>
-    """)
+    return {"auth_url": auth_url}
+
+# In the callback endpoint
+# In-memory store for demonstration purposes
+account_store = {}
+
 @app.get("/callback")
 async def callback(code: str = None, hub_mode: str = None, hub_verify_token: str = None, hub_challenge: str = None):
     print(f"Callback received - code: {code}")
@@ -68,7 +83,7 @@ async def callback(code: str = None, hub_mode: str = None, hub_verify_token: str
     if hub_mode == 'subscribe' and hub_verify_token:
         if hub_verify_token == VERIFY_TOKEN:
             return int(hub_challenge)
-        return {"error": "Verify token mismatch"}, 403
+        return JSONResponse({"error": "Verify token mismatch"}, status_code=403)
 
     if code:
         # Step 1: Exchange code for short-lived access token
@@ -109,23 +124,27 @@ async def callback(code: str = None, hub_mode: str = None, hub_verify_token: str
                 account_data = account_response.json()
                 
                 if 'id' in account_data:
-                    # In the callback endpoint, update the HTML form to:
-                    return HTMLResponse(f"""
-                    <html>
-                        <body>
-                            <h1>Upload Video</h1>
-                            <form action="/upload" method="post" enctype="multipart/form-data">
-                                <input type="text" name="video_url" placeholder="Enter video URL" required><br>
-                                <input type="text" name="caption" placeholder="Caption"><br>
-                                <input type="hidden" name="access_token" value="{long_lived_data['access_token']}"><br>
-                                <input type="hidden" name="ig_account_id" value="{account_data['id']}"><br>
-                                <input type="submit" value="Upload">
-                            </form>
-                        </body>
-                    </html>
-                    """)
-    
-    return HTMLResponse("Authentication failed. Please try again.", status_code=400)
+                    response_data = {
+                        "success": True,
+                        "access_token": long_lived_data['access_token'],
+                        "account_id": account_data['id'],
+                        "username": account_data.get('username'),
+                        "account_type": account_data.get('account_type')
+                    }
+                    # Return the response data directly
+                    return JSONResponse(response_data)
+                    # Store the account data
+                    account_store[account_data['id']] = response_data
+                    return JSONResponse({"message": "Login successful", "account_id": account_data['id']})
+                    return JSONResponse({"message": "Login successful"})
+
+@app.get("/account")
+async def get_account(account_id: str):
+    account_data = account_store.get(account_id)
+    if account_data:
+        return JSONResponse(account_data)
+    return JSONResponse({"error": "Account not found"}, status_code=404)
+
 @app.post("/upload")
 async def upload_video(
     video_url: str = Form(...),
